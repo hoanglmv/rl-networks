@@ -1,74 +1,96 @@
-import numpy as np
-import random
+# agent.py
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras import layers
+import numpy as np
 
-from replay_buffer import ReplayBuffer
+class DDPGAgent:
+    def __init__(self, state_dim, action_dim):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        # Hyperparameters (theo bài báo)
+        self.gamma = 0.99
+        self.tau = 5e-3
+        self.batch_size = 128
+        self.lr = 1e-3
+        self.policy_noise = 0.2
+        self.noise_clip = 0.1
 
-class DQNAgent:
-    def __init__(self, state_size, action_size):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.memory = ReplayBuffer(buffer_size=2000) # Increased buffer size
-        self.gamma = 0.95    # discount rate
-        self.epsilon = 1.0  # exploration rate
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
-        self.learning_rate = 0.001
-        self.model = self._build_model()
-        self.target_model = self._build_model()
-        self.update_target_model()
-        self.batch_size = 32
+        # Actor network μθ(s)
+        self.actor = self.build_actor()
+        self.actor_target = self.build_actor()
+        self.actor_target.set_weights(self.actor.get_weights())
+        # Critic networks Qφ(s,a)
+        self.critic1 = self.build_critic()
+        self.critic2 = self.build_critic()
+        self.critic_target1 = self.build_critic()
+        self.critic_target2 = self.build_critic()
+        self.critic_target1.set_weights(self.critic1.get_weights())
+        self.critic_target2.set_weights(self.critic2.get_weights())
 
-    def _build_model(self):
-        model = Sequential()
-        model.add(Dense(24, input_dim=self.state_size, activation='relu'))
-        model.add(Dense(24, activation='relu'))
-        model.add(Dense(self.action_size, activation='linear'))
-        model.compile(loss='mse', optimizer=Adam(learning_rate=self.learning_rate))
-        return model
+        self.replay_buffer = ReplayBuffer(self.state_dim, self.action_dim, int(1e6))
+        self.actor_optimizer = tf.keras.optimizers.Adam(self.lr)
+        self.critic_optimizer = tf.keras.optimizers.Adam(self.lr)
 
-    def update_target_model(self):
-        self.target_model.set_weights(self.model.get_weights())
+    def build_actor(self):
+        state_input = layers.Input(shape=(self.state_dim,))
+        x = layers.Dense(256, activation='relu')(state_input)
+        x = layers.Dense(256, activation='relu')(x)
+        out = layers.Dense(self.action_dim, activation='tanh')(x)
+        # Chuyển từ [-1,1] sang [0,1]
+        output = layers.Lambda(lambda x: (x + 1) / 2)(out)
+        return tf.keras.Model(state_input, output)
 
-    def remember(self, state, action, reward, next_state, done):
-        self.memory.add(state, action, reward, next_state, done)
+    def build_critic(self):
+        state_input = layers.Input(shape=(self.state_dim,))
+        action_input = layers.Input(shape=(self.action_dim,))
+        x = layers.Concatenate()([state_input, action_input])
+        x = layers.Dense(256, activation='relu')(x)
+        x = layers.Dense(256, activation='relu')(x)
+        q = layers.Dense(1)(x)
+        return tf.keras.Model([state_input, action_input], q)
 
-    def act(self, state):
-        if np.random.rand() <= self.epsilon:
-            return random.randrange(self.action_size)
-        q_values = self.model.predict(state, verbose=0)
-        return np.argmax(q_values[0])
+    def get_action(self, state, noise=True):
+        state = state.reshape(1, -1)
+        action = self.actor(state)[0].numpy()
+        if noise:
+            action += np.random.normal(0, self.policy_noise, size=self.action_dim)
+        return np.clip(action, 0, 1)
 
-    def replay(self):
-        if len(self.memory) < self.batch_size:
+    def train(self):
+        if self.replay_buffer.size < self.batch_size:
             return
-        minibatch = self.memory.sample(self.batch_size)
-        
-        states = np.array([s[0] for s in minibatch])
-        actions = np.array([s[1] for s in minibatch])
-        rewards = np.array([s[2] for s in minibatch])
-        next_states = np.array([s[3] for s in minibatch])
-        dones = np.array([s[4] for s in minibatch])
+        states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
+        # Thêm noise vào hành động mục tiêu (TD3) và clip vào [0,1]
+        next_actions = self.actor_target(next_states)
+        noise = tf.clip_by_value(tf.random.normal(shape=next_actions.shape, stddev=self.policy_noise),
+                                 -self.noise_clip, self.noise_clip)
+        next_actions = tf.clip_by_value(next_actions + noise, 0, 1)
+        # Tính target Q giá trị: r + γ * min(Q1', Q2')
+        target_q1 = self.critic_target1([next_states, next_actions])
+        target_q2 = self.critic_target2([next_states, next_actions])
+        target_q = rewards + self.gamma * (1 - dones) * tf.minimum(target_q1, target_q2)
+        # Cập nhật critic networks
+        with tf.GradientTape() as tape:
+            current_q1 = self.critic1([states, actions])
+            loss1 = tf.reduce_mean((current_q1 - target_q)**2)
+        grads1 = tape.gradient(loss1, self.critic1.trainable_variables)
+        self.critic_optimizer.apply_gradients(zip(grads1, self.critic1.trainable_variables))
+        with tf.GradientTape() as tape:
+            current_q2 = self.critic2([states, actions])
+            loss2 = tf.reduce_mean((current_q2 - target_q)**2)
+        grads2 = tape.gradient(loss2, self.critic2.trainable_variables)
+        self.critic_optimizer.apply_gradients(zip(grads2, self.critic2.trainable_variables))
+        # Cập nhật actor policy (dùng gradient của Q từ critic1)
+        with tf.GradientTape() as tape:
+            actions_pred = self.actor(states)
+            actor_loss = -tf.reduce_mean(self.critic1([states, actions_pred]))
+        actor_grads = tape.gradient(actor_loss, self.actor.trainable_variables)
+        self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
+        # Cập nhật target networks
+        self.update_target(self.actor.variables,   self.actor_target.variables)
+        self.update_target(self.critic1.variables, self.critic_target1.variables)
+        self.update_target(self.critic2.variables, self.critic_target2.variables)
 
-        # Reshape states and next_states if they are not already 2D
-        if states.ndim == 1:
-            states = np.vstack(states)
-        if next_states.ndim == 1:
-            next_states = np.vstack(next_states)
-
-        target_q_values = self.target_model.predict(next_states, verbose=0)
-        
-        targets = self.model.predict(states, verbose=0)
-
-        for i in range(self.batch_size):
-            if dones[i]:
-                targets[i][actions[i]] = rewards[i]
-            else:
-                targets[i][actions[i]] = rewards[i] + self.gamma * np.amax(target_q_values[i])
-        
-        self.model.fit(states, targets, epochs=1, verbose=0)
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
+    def update_target(self, weights, target_weights):
+        for (w, tw) in zip(weights, target_weights):
+            tw.assign(self.tau * w + (1 - self.tau) * tw)
