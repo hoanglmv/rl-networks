@@ -1,6 +1,6 @@
 # agent.py
 import tensorflow as tf
-from tensorflow.keras import layers
+from tensorflow.keras import layers # type: ignore
 import numpy as np
 from replay_buffer import ReplayBuffer
 
