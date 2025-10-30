@@ -1,4 +1,3 @@
-# Utility functions and constants will be added here as needed.
 # utils.py
 import numpy as np
 
