@@ -1,13 +1,15 @@
 # main.py
 import numpy as np
 from environment import WirelessEnv
-from agent import DDPGAgent
+from agent import TD3Agent
+from utils import set_seed
 
 def main():
+    set_seed(0)
     env = WirelessEnv()
     state_dim = env._get_state().shape[0]
     action_dim = env.K * 2  # 2 thresholds per cell
-    agent = DDPGAgent(state_dim, action_dim)
+    agent = TD3Agent(state_dim, action_dim)
 
     n_episodes = 100
     for ep in range(n_episodes):

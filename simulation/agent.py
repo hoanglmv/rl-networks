@@ -2,8 +2,9 @@
 import tensorflow as tf
 from tensorflow.keras import layers
 import numpy as np
+from replay_buffer import ReplayBuffer
 
-class DDPGAgent:
+class TD3Agent:
     def __init__(self, state_dim, action_dim):
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -27,9 +28,16 @@ class DDPGAgent:
         self.critic_target1.set_weights(self.critic1.get_weights())
         self.critic_target2.set_weights(self.critic2.get_weights())
 
+        # Dummy calls to build the models and instantiate variables
+        dummy_state = tf.zeros((1, self.state_dim), dtype=tf.float32)
+        dummy_action = tf.zeros((1, self.action_dim), dtype=tf.float32)
+        self.critic1([dummy_state, dummy_action])
+        self.critic2([dummy_state, dummy_action])
+
         self.replay_buffer = ReplayBuffer(self.state_dim, self.action_dim, int(1e6))
         self.actor_optimizer = tf.keras.optimizers.Adam(self.lr)
-        self.critic_optimizer = tf.keras.optimizers.Adam(self.lr)
+        self.critic_optimizer1 = tf.keras.optimizers.Adam(self.lr)
+        self.critic_optimizer2 = tf.keras.optimizers.Adam(self.lr)
 
     def build_actor(self):
         state_input = layers.Input(shape=(self.state_dim,))
@@ -60,6 +68,13 @@ class DDPGAgent:
         if self.replay_buffer.size < self.batch_size:
             return
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
+
+        states = tf.convert_to_tensor(states, dtype=tf.float32)
+        actions = tf.convert_to_tensor(actions, dtype=tf.float32)
+        rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
+        next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
+        dones = tf.convert_to_tensor(dones, dtype=tf.float32)
+
         # Thêm noise vào hành động mục tiêu (TD3) và clip vào [0,1]
         next_actions = self.actor_target(next_states)
         noise = tf.clip_by_value(tf.random.normal(shape=next_actions.shape, stddev=self.policy_noise),
@@ -74,12 +89,12 @@ class DDPGAgent:
             current_q1 = self.critic1([states, actions])
             loss1 = tf.reduce_mean((current_q1 - target_q)**2)
         grads1 = tape.gradient(loss1, self.critic1.trainable_variables)
-        self.critic_optimizer.apply_gradients(zip(grads1, self.critic1.trainable_variables))
+        self.critic_optimizer1.apply_gradients(zip(grads1, self.critic1.trainable_variables))
         with tf.GradientTape() as tape:
             current_q2 = self.critic2([states, actions])
             loss2 = tf.reduce_mean((current_q2 - target_q)**2)
         grads2 = tape.gradient(loss2, self.critic2.trainable_variables)
-        self.critic_optimizer.apply_gradients(zip(grads2, self.critic2.trainable_variables))
+        self.critic_optimizer2.apply_gradients(zip(grads2, self.critic2.trainable_variables))
         # Cập nhật actor policy (dùng gradient của Q từ critic1)
         with tf.GradientTape() as tape:
             actions_pred = self.actor(states)
